@@ -1,0 +1,557 @@
+# 🚀 FINCEPT AI QUANT TRADER — REPLIT AGENT SUPER PROMPT
+## Full Dashboard Repair + Alpaca API Integration + Automated Trading
+
+---
+
+## 🎯 MISSION OVERVIEW
+
+You are rebuilding and fully wiring the **Fincept AI Quant Trader dashboard** — a professional algorithmic trading terminal. The dashboard UI already exists visually but **nothing is connected or functional**. Your job is to:
+
+1. **Audit and fix every broken UI element** in the existing codebase
+2. **Add an API Key Settings modal** (Alpaca paper + live keys)
+3. **Place a live test trade for NVIDIA (NVDA)** via Alpaca to verify connectivity
+4. **Wire the START AGENT button** to launch a fully automated trading loop
+5. **Animate the execution cycle** exactly like the GIF reference (Scan → Detect → Validate → Size → Fill → Settle)
+
+---
+
+## 🔍 STEP 1 — CODEBASE AUDIT (DO THIS FIRST)
+
+Before writing any new code, **read every existing file** in the project:
+
+```
+- List all files in the repo
+- Read index.html / App.jsx / main entry point
+- Read all component files
+- Read all API/backend files
+- Read package.json / requirements.txt
+- Identify what is broken, missing, or disconnected
+- Create a checklist of every UI element and mark: ✅ Working / ❌ Broken / 🔌 Not Connected
+```
+
+**Expected broken elements to find and fix:**
+- START AGENT button → does nothing
+- Execution Cycle progress bar (Scan/Detect/Validate/Size/Fill/Settle) → static
+- MIROFISH BTC Force Graph (bubble visualization) → static/frozen
+- Robustness Matrix table → hardcoded, not fetching live data
+- Monte Carlo chart → static PNG or placeholder
+- Ticker tape (top bar: TSLA, AMZN, SOL, VIX, SPX, NDX, DJI, BTC) → not live
+- Live PnL counter → not updating
+- Win Rate / Trades / Streak counters → hardcoded
+- WebSocket status (WS: RESEARCH) → not connected
+- Agent log output → empty
+- Circuit status → not toggling
+- POSITIONS counter → static
+
+---
+
+## 🔐 STEP 2 — SETTINGS MODAL (Alpaca API Keys)
+
+Add a **⚙️ Settings button** immediately to the LEFT of the START AGENT button in the top-right header area.
+
+### Visual Style:
+```
+[ ⚙️ SETTINGS ]  [ ▶ START AGENT ]
+```
+- Settings button: same height as START AGENT, dark gray background, gear icon, white text
+- Positioned in the header bar at top-right
+
+### Settings Modal Content:
+When clicked, open a **dark modal overlay** with the following fields:
+
+```
+╔══════════════════════════════════════════════╗
+║  ⚙️  ALPACA API CONFIGURATION                ║
+╠══════════════════════════════════════════════╣
+║                                              ║
+║  ENVIRONMENT                                 ║
+║  ○ Paper Trading  ● Live Trading             ║
+║                                              ║
+║  API KEY ID                                  ║
+║  [________________________________]          ║
+║                                              ║
+║  SECRET KEY                                  ║
+║  [________________________________] 👁        ║
+║                                              ║
+║  BASE URL (auto-filled)                      ║
+║  [https://paper-api.alpaca.markets]          ║
+║                                              ║
+║  ──────────────────────────────────          ║
+║  🧪 TEST CONNECTION                          ║
+║  → Place 1 share of NVDA (market order)      ║
+║  → Verify fill confirmation                  ║
+║                                              ║
+║  [ CANCEL ]          [ SAVE & TEST → ]       ║
+╚══════════════════════════════════════════════╝
+```
+
+### Settings Logic:
+```javascript
+// Store keys securely in environment or localStorage (paper trading only)
+// When "Paper" selected → BASE_URL = "https://paper-api.alpaca.markets"
+// When "Live" selected → BASE_URL = "https://api.alpaca.markets" + RED WARNING banner
+// Keys are masked after save (show only last 4 chars)
+// Settings persist across sessions (use localStorage or .env)
+```
+
+---
+
+## 🧪 STEP 3 — NVIDIA TEST TRADE
+
+After the user clicks **SAVE & TEST →** in the Settings modal:
+
+### Test Trade Flow:
+```
+1. Validate API keys by calling GET /v2/account
+2. If valid → show "✅ Connected | Buying Power: $XXX"
+3. Place order:
+   POST /v2/orders
+   {
+     "symbol": "NVDA",
+     "qty": 1,
+     "side": "buy",
+     "type": "market",
+     "time_in_force": "day"
+   }
+4. Poll GET /v2/orders/{order_id} every 500ms until status = "filled"
+5. Show success notification:
+   "✅ TEST TRADE FILLED — NVDA x1 @ $XXX.XX"
+   "Alpaca API connected. Agent ready to launch."
+6. Close modal and enable START AGENT button (it should glow green)
+```
+
+### Error Handling:
+```
+- Invalid keys → "❌ Authentication failed. Check your API key and secret."
+- Market closed → "⚠️ Market closed. Order queued for next open."
+- Insufficient funds → "❌ Insufficient buying power."
+- All errors shown in modal, not console
+```
+
+---
+
+## 🤖 STEP 4 — START AGENT AUTOMATION ENGINE
+
+When user clicks **START AGENT** (after API keys are verified):
+
+### 4A — Agent State Machine
+The agent runs a continuous loop cycling through these 6 states, matching the UI's execution cycle header:
+
+```
+SCAN → DETECT → VALIDATE → SIZE → FILL → SETTLE → (repeat)
+```
+
+Each state lights up in the UI progress bar in sequence (matching the GIF animation).
+
+### 4B — SCAN Phase (Market Data)
+```javascript
+// Every 5 seconds, fetch latest quotes for watchlist:
+// ["NVDA", "TSLA", "AMZN", "AAPL", "MSFT", "BTCUSD", "ETHUSD"]
+// Use Alpaca Data API:
+// GET https://data.alpaca.markets/v2/stocks/{symbol}/quotes/latest
+// GET https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe=5Min
+// Update ticker tape with live prices
+// Update robustness matrix with % changes across timeframes
+```
+
+### 4C — DETECT Phase (Signal Generation)
+```javascript
+// Apply these signal detection algorithms:
+// 1. MOMENTUM: Compare current price vs 15-bar EMA
+//    → Bull signal if price > EMA and volume spike > 1.5x avg
+// 2. COLLISION: Detect when 2+ assets move >0.5% in same direction within 30s
+// 3. CATALYST: Check for unusual volume (>2x 20-period average)
+// 4. CLUSTER: Group assets by correlation coefficient (rolling 20 bars)
+
+// Animate the MIROFISH Force Graph:
+// Each bubble = one signal node
+// Color: Green=Bull, Red=Bear, Yellow=Catalyst, Blue=Cluster, Orange=Collision
+// Size = signal strength (0-1 scale)
+// Bubbles drift and collide using physics simulation (use d3-force or matter.js)
+// Highlight detected signals with pulsing glow effect
+// Show "NEAR-R SNIPE" banner when a high-probability trade setup is detected
+```
+
+### 4D — VALIDATE Phase (Risk Checks)
+```javascript
+// Before any trade:
+// 1. Check portfolio heat: Current exposure / Total equity < 0.15 (15% max)
+// 2. Check max drawdown: If today's PnL < -2% of equity → HALT trading
+// 3. Check position limits: Max 5 concurrent open positions
+// 4. Run Monte Carlo check: Simulate 1000 paths from current position
+//    → Only proceed if P(profit) > 0.55
+// 5. Check circuit breaker: If 3 consecutive losses → pause 15 minutes
+// Update HORIZON meter (0-100) based on risk score
+```
+
+### 4E — SIZE Phase (Kelly Criterion)
+```javascript
+// Calculate position size using Kelly Criterion:
+// f = (bp - q) / b
+// where:
+//   b = average win / average loss (from historical trades)
+//   p = win rate (from agent's trade history)
+//   q = 1 - p
+// Apply 25% Kelly fraction for safety (fractional Kelly)
+// Maximum position: 5% of total equity per trade
+// Display calculated size in the SIZE cell of execution cycle
+```
+
+### 4F — FILL Phase (Order Execution)
+```javascript
+// Execute via Alpaca API:
+// 1. Submit market order for calculated size
+// 2. Show order in execution cycle as FILL (highlighted cyan/green)
+// 3. Display fill price and time in agent log
+// 4. Update POSITIONS counter
+// 5. Increment TRADE counter
+// 6. Animate the force graph: trigger ripple effect on filled asset bubble
+
+// Fill animation (matching GIF):
+// - Progress bar jumps to FILL step with bright highlight
+// - A "FILL 0.94S" badge appears top-right showing latency
+// - Execution cycle counter increments (#495, #496, etc.)
+```
+
+### 4G — SETTLE Phase (Position Management)
+```javascript
+// After fill:
+// 1. Set stop-loss: entry_price * 0.985 (1.5% below entry)
+// 2. Set take-profit: entry_price * 1.025 (2.5% above entry)
+// 3. Monitor position every 5 seconds
+// 4. If stop or target hit → close position via:
+//    DELETE /v2/positions/{symbol}
+// 5. Update PnL in real-time
+// 6. Log trade result to history
+// 7. Update WIN RATE, STREAK, AVG R/R metrics
+// 8. Update Monte Carlo chart with new data point
+
+// After settle → restart from SCAN
+```
+
+---
+
+## 📊 STEP 5 — LIVE DATA CONNECTIONS
+
+### 5A — Ticker Tape (Top Bar)
+```javascript
+// Connect WebSocket for real-time prices:
+// wss://stream.data.alpaca.markets/v2/sip
+// Subscribe to: NVDA, TSLA, AMZN, AAPL, MSFT
+// For crypto: wss://stream.data.alpaca.markets/v2/crypto
+// Subscribe to: BTCUSD, ETHUSD, SOLUSD
+// Update every tick — show price + % change + color (green/red)
+// Ticker tape scrolls continuously left-to-right
+```
+
+### 5B — Robustness Matrix
+```javascript
+// 7 Assets × 6 Timeframes grid
+// Assets: BTCUSD, ETHUSD, SOLUSD, BNBUSD, XRPUSD, ADAUSD, DOTUSD
+// Timeframes: 5M, 15M, 30M, 1H, 4H, 1D
+// For each cell: fetch historical bars and calculate % change
+// Color coding:
+//   > +3% → bright green
+//   +1% to +3% → medium green  
+//   -1% to +1% → yellow/olive
+//   -1% to -3% → orange
+//   < -3% → red
+// Refresh every 30 seconds
+// AVG column = mean of all timeframes for that asset
+```
+
+### 5C — Monte Carlo Chart
+```javascript
+// Display 7,854 simulated return paths as histogram
+// X-axis: simulated return outcomes (from -42% to +42%)
+// Y-axis: frequency of paths
+// Color gradient: red (left, losses) → yellow (center) → green (right, gains)
+// Calculate from agent's trade history:
+//   - Mean return per trade
+//   - Std deviation of returns
+//   - Run 7,854 random paths using geometric Brownian motion
+// Show statistics below chart:
+//   σ=0.42% ± 3.1%  VaR₉₅=-1.7%  CVaR=-31.4%  Sharpe 2.42  Sortino 3.12
+// Recalculate and animate after every completed trade
+```
+
+### 5D — Performance Stats (Right Panel)
+```javascript
+// Wire these live counters:
+// CONV: Convergence % of signals → real-time calculation
+// BEAT: Number of assets outperforming benchmark
+// BULL: Number of bullish signals active
+// SIG: Active signal count
+// STREAK: Consecutive winning trades
+// PACE: Projected earnings per hour ($277/HR = running total ÷ hours active)
+// NEXT: Countdown in seconds until next execution cycle
+// PERF/RISK/STAT scores (0-100) based on agent performance
+// HORIZON: Risk horizon meter (animated circular gauge 0-100)
+```
+
+---
+
+## 🌊 STEP 6 — MIROFISH FORCE GRAPH ANIMATION
+
+This is the central visualization — a physics-based bubble field showing live signal nodes.
+
+```javascript
+// Implementation using D3.js force simulation:
+
+const signals = [
+  { id: "BULL", type: "bull", strength: 0.8, asset: "BTCUSD" },
+  { id: "BEAR", type: "bear", strength: 0.6, asset: "ETHUSD" },
+  { id: "CATALYST", type: "catalyst", strength: 0.9, asset: "NVDA" },
+  { id: "CLUSTER", type: "cluster", strength: 0.7, assets: ["SOL","BNB"] },
+  { id: "COLLISION", type: "collision", strength: 1.0, assets: ["BTC","ETH"] },
+  { id: "MOMENTUM", type: "momentum", strength: 0.75, asset: "TSLA" },
+  // ... generate dynamically from live market data
+];
+
+// Physics rules:
+// - Nodes repel each other (charge force: -30)
+// - Bull nodes drift RIGHT, Bear nodes drift LEFT
+// - Collision nodes attract each other and pulse
+// - Catalyst nodes orbit the center slowly
+// - Cluster nodes stay grouped together
+// - All nodes have slight gravity toward center
+// - Node size = signal.strength * 20px (radius)
+// - On trade execution: burst animation from selected node
+// - Show label: "NEAR-R SNIPE 73¢ → 79¢ EDGE +6¢" when best setup found
+//   (NEAR-R = risk-adjusted near-term return; 73¢ entry → 79¢ target → 6¢ edge)
+
+// Color map:
+// bull → #00ff88 (green)
+// bear → #ff3355 (red)  
+// catalyst → #ffaa00 (orange)
+// cluster → #0088ff (blue)
+// collision → #ff00ff (magenta)
+// momentum → #ffff00 (yellow)
+```
+
+---
+
+## 📡 STEP 7 — WEBSOCKET STATUS & AGENT LOG
+
+### WebSocket Connection Display (bottom bar)
+```
+● LIVE  ✓ READY  ● CONNECTED  ◈ STREAM: 1.8k/s  LAT: 9ms
+WS: RESEARCH  UPTIME: 6h 3m  STACK
+```
+- Show real connection status (green=connected, red=disconnected)
+- Display actual latency from WebSocket ping
+- Show messages/second throughput
+- Auto-reconnect if WebSocket drops (retry with exponential backoff)
+
+### Agent Log (below the header section)
+```javascript
+// Display rolling log of agent actions:
+// [14:25:36] SCAN → 7 assets loaded, 847 data points
+// [14:25:37] DETECT → BULL signal on BTCUSD (strength: 0.82)
+// [14:25:38] VALIDATE → Risk check passed. Horizon: 87/100
+// [14:25:38] SIZE → Kelly: 2.3% equity = 4 shares NVDA
+// [14:25:39] FILL → NVDA x4 @ $134.21 | Latency: 0.94s
+// [14:25:44] SETTLE → Stop: $132.19 | Target: $137.57
+// [14:26:02] SETTLE → TP HIT! +$13.44 | +0.82% | Streak: 63
+// Timestamps, color-coded by type (green=profit, red=loss, yellow=info)
+// Max 50 lines, auto-scroll to bottom
+```
+
+---
+
+## 🏗️ STEP 8 — TECHNICAL ARCHITECTURE
+
+### File Structure to Create/Fix:
+```
+fincept/
+├── frontend/
+│   ├── App.jsx (or index.html)
+│   ├── components/
+│   │   ├── Header.jsx          ← ticker tape + nav
+│   │   ├── AgentControls.jsx   ← Settings button + START AGENT button
+│   │   ├── SettingsModal.jsx   ← API key input + test trade
+│   │   ├── ExecutionCycle.jsx  ← Scan/Detect/Validate/Size/Fill/Settle
+│   │   ├── ForceGraph.jsx      ← MIROFISH D3 bubble physics
+│   │   ├── RobustnessMatrix.jsx ← 7×6 color grid
+│   │   ├── MonteCarloChart.jsx ← histogram visualization
+│   │   ├── StatsPanel.jsx      ← right-side metrics
+│   │   └── AgentLog.jsx        ← rolling log
+│   └── hooks/
+│       ├── useAlpaca.js        ← API calls
+│       ├── useWebSocket.js     ← real-time stream
+│       └── useAgent.js         ← trading state machine
+├── backend/ (if needed)
+│   ├── server.js (Express/FastAPI proxy)
+│   └── agent.js (trading logic)
+└── .env
+    ├── ALPACA_API_KEY
+    ├── ALPACA_SECRET_KEY
+    └── ALPACA_BASE_URL
+```
+
+### CORS Solution:
+```javascript
+// Alpaca API blocks direct browser requests for some endpoints
+// Create a lightweight backend proxy:
+// POST /api/proxy → forwards to Alpaca with stored credentials
+// This keeps API keys server-side and solves CORS
+
+// Express proxy example:
+app.post('/api/alpaca/*', async (req, res) => {
+  const alpacaUrl = `${process.env.ALPACA_BASE_URL}${req.path.replace('/api/alpaca', '')}`;
+  const response = await fetch(alpacaUrl, {
+    method: req.method,
+    headers: {
+      'APCA-API-KEY-ID': process.env.ALPACA_API_KEY,
+      'APCA-API-SECRET-KEY': process.env.ALPACA_SECRET_KEY,
+      'Content-Type': 'application/json'
+    },
+    body: req.method !== 'GET' ? JSON.stringify(req.body) : undefined
+  });
+  res.json(await response.json());
+});
+```
+
+---
+
+## 🎨 STEP 9 — UI/UX REQUIREMENTS
+
+### Color Theme (must match exactly):
+```css
+--bg-primary: #0a0a0a;
+--bg-secondary: #111111;
+--bg-panel: #0d0d0d;
+--accent-green: #00ff88;
+--accent-yellow: #ffd700;
+--accent-orange: #ff6600;
+--accent-cyan: #00ccff;
+--accent-red: #ff3355;
+--accent-magenta: #ff00ff;
+--text-primary: #ffffff;
+--text-secondary: #888888;
+--border: #222222;
+--execution-active: #ffd700;  /* bright yellow for active cycle step */
+--btn-start: #00bb66;
+--btn-settings: #333333;
+```
+
+### Font:
+```css
+font-family: 'Courier New', 'JetBrains Mono', monospace; /* terminal aesthetic */
+```
+
+### Animations Required:
+```css
+/* Execution cycle step highlight */
+.cycle-step.active {
+  background: var(--execution-active);
+  color: #000;
+  animation: pulse 0.5s ease-in-out infinite alternate;
+}
+
+/* Ticker tape scroll */
+.ticker-tape {
+  animation: scroll-left 30s linear infinite;
+}
+
+/* Force graph bubbles */
+/* Use D3 force simulation tick for positions */
+/* Add glow filter on hover and on signal detection */
+
+/* Start agent button when active */
+.start-agent.running {
+  background: #ff4400;
+  animation: agent-pulse 1s ease-in-out infinite;
+}
+/* When running, button text changes to "◼ STOP AGENT" */
+```
+
+---
+
+## ✅ STEP 10 — TESTING CHECKLIST
+
+After implementation, verify each item works:
+
+```
+□ Settings button opens modal
+□ API key fields accept input (secret masked)
+□ Paper/Live toggle switches base URL
+□ "Save & Test" places real NVDA market order on Alpaca paper account
+□ Order fill confirmation appears in modal
+□ START AGENT button enables after successful test
+□ START AGENT begins execution cycle animation
+□ Execution cycle steps animate: Scan → Detect → Validate → Size → Fill → Settle
+□ Cycle counter increments (#744, #745, etc.)
+□ Force graph bubbles move with physics simulation
+□ Bubble colors match signal types
+□ "NEAR-R SNIPE" banner appears for high-confidence signals
+□ Robustness matrix shows colored cells with % values
+□ Ticker tape scrolls with live prices
+□ PACE counter updates ($277/HR style)
+□ STREAK counter increments on wins
+□ NEXT countdown timer resets each cycle
+□ Agent log scrolls with new entries
+□ WebSocket status shows CONNECTED (green)
+□ STOP AGENT button halts all trading and closes positions
+□ Monte Carlo histogram updates after trades
+□ All numbers change in real-time (not hardcoded)
+```
+
+---
+
+## ⚠️ CRITICAL CONSTRAINTS
+
+1. **PAPER TRADING ONLY BY DEFAULT** — Default environment must be paper trading. Add a red confirmation dialog before switching to live.
+
+2. **NO HARDCODED VALUES** — Every number in the UI must come from real data or calculations. Zero fake data in production.
+
+3. **GRACEFUL DEGRADATION** — If WebSocket drops, fall back to REST polling every 5 seconds. Show reconnection status.
+
+4. **API KEY SECURITY** — Never log API keys. Store in .env server-side, never in frontend JS bundles.
+
+5. **STOP AGENT = FULL HALT** — When agent stops, cancel all pending orders first, then stop the loop.
+
+6. **POSITION LIMITS** — Hard cap at $10,000 per position and 5 concurrent positions. Add these as configurable settings.
+
+7. **DO NOT MOCK DATA** — If market data is unavailable (weekend/holiday), show "MARKET CLOSED — Agent Standby" and pause cycle. Never fake fills.
+
+---
+
+## 🚦 EXECUTION ORDER FOR REPLIT AGENT
+
+```
+1. Read all existing files → identify broken components
+2. Install missing dependencies (d3, alpaca-trade-api or fetch, ws)  
+3. Create Settings modal with API key form
+4. Build Alpaca API service (proxy if needed for CORS)
+5. Implement test trade flow for NVDA
+6. Wire START AGENT to trading state machine
+7. Connect WebSocket for live prices
+8. Animate execution cycle progress bar
+9. Build/fix MIROFISH force graph with D3
+10. Connect Robustness Matrix to live data
+11. Wire all stats panel counters
+12. Build Monte Carlo histogram
+13. Connect agent log
+14. Fix ticker tape
+15. End-to-end test: Settings → Test Trade → Start Agent → Watch cycle run
+```
+
+---
+
+## 📦 DEPENDENCIES TO INSTALL
+
+```bash
+# Frontend
+npm install d3 @alpacahq/alpaca-trade-api recharts framer-motion
+
+# If using Python backend
+pip install alpaca-trade-api fastapi uvicorn websockets python-dotenv
+
+# If using Node backend
+npm install express alpaca ws dotenv cors node-fetch
+```
+
+---
+
+**BEGIN NOW. Audit the codebase first, then execute steps 1-10 in order. Do not skip the NVIDIA test trade — it is the validation gate. The agent must not start without confirmed API connectivity.**
