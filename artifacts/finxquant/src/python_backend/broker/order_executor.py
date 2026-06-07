@@ -1,160 +1,232 @@
 """
 broker/order_executor.py
 ------------------------
-Order submission, bracket orders, stop management,
-position close, and unique trade_id tracking.
+Order submission, bracket orders, stop management, and position close.
+Every order carries a unique trade_id that links:
+    risk decision → order submission → fill notification
+
+Rules enforced here:
+  • Default: LIMIT order at ±0.1% of current price
+  • Cancel after 30s if unfilled; optionally retry as market
+  • Bracket orders: entry + stop + take-profit via Alpaca OCO
+  • modify_stop: only TIGHTEN (raise for long, lower for short) — never widen
 """
 
 import uuid
 import time
 import logging
-from dataclasses import dataclass, field
-from typing import Optional
-
-from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import (
-    LimitOrderRequest, MarketOrderRequest,
-    TakeProfitRequest, StopLossRequest,
+    MarketOrderRequest,
+    LimitOrderRequest,
+    StopLossRequest,
+    TakeProfitRequest,
+    ReplaceOrderRequest,
+    GetOrdersRequest,
+    OrderRequest,
 )
-from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass
+from alpaca.trading.enums import OrderSide, TimeInForce, OrderStatus, QueryOrderStatus
 
 logger = logging.getLogger(__name__)
 
-LIMIT_OFFSET_PCT  = 0.001   # 0.1% off current price for limit orders
-FILL_TIMEOUT_SECS = 30      # cancel if unfilled after this many seconds
+LIMIT_OFFSET_PCT  = 0.001   # 0.1% away from current price
+ORDER_TIMEOUT_SEC = 30      # cancel unfilled limit after this many seconds
+POLL_INTERVAL_SEC = 2       # how often to check fill status
 
 
-@dataclass
-class Signal:
-    symbol:       str
-    side:         str           # "buy" | "sell"
-    qty:          float
-    current_price: float
-    stop_price:   Optional[float] = None
-    take_profit:  Optional[float] = None
-    metadata:     dict = field(default_factory=dict)
+def _new_trade_id() -> str:
+    """Unique 12-char ID linking risk_decision → order → fill."""
+    return "TRD-" + uuid.uuid4().hex[:9].upper()
 
 
 class OrderExecutor:
-    def __init__(self, trading_client: TradingClient):
-        self.client = trading_client
-        self._active_orders: dict[str, str] = {}   # trade_id -> order_id
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
-    def _new_trade_id(self) -> str:
-        return f"TRD-{uuid.uuid4().hex[:8].upper()}"
-
-    def _limit_price(self, side: str, current_price: float) -> float:
-        if side == "buy":
-            return round(current_price * (1 + LIMIT_OFFSET_PCT), 2)
-        return round(current_price * (1 - LIMIT_OFFSET_PCT), 2)
-
-    # ------------------------------------------------------------------
-    # Public methods
-    # ------------------------------------------------------------------
-
-    def submit_order(self, signal: Signal, retry_at_market: bool = False) -> dict:
+    def __init__(self, alpaca_client) -> None:
         """
-        Submit a LIMIT order. Cancel after FILL_TIMEOUT_SECS if unfilled.
-        Optionally retry as market order.
-        Returns dict with trade_id + order_id.
+        Parameters
+        ----------
+        alpaca_client : AlpacaClient
+            Shared instance — do not create a second connection.
         """
-        trade_id   = self._new_trade_id()
-        limit_px   = self._limit_price(signal.side, signal.current_price)
-        side_enum  = OrderSide.BUY if signal.side == "buy" else OrderSide.SELL
+        self.client = alpaca_client.client
+        self._active: dict[str, str] = {}  # trade_id → order_id
+
+    # ── Helpers ──────────────────────────────────────────────────────────────
+
+    def _limit_price(self, side: OrderSide, current_price: float) -> float:
+        offset = current_price * LIMIT_OFFSET_PCT
+        px = current_price + offset if side == OrderSide.BUY else current_price - offset
+        return round(px, 2)
+
+    def _poll_for_fill(self, order_id, trade_id: str) -> str:
+        """Poll until filled, timeout, or cancellation. Returns final status string."""
+        deadline = time.monotonic() + ORDER_TIMEOUT_SEC
+        while time.monotonic() < deadline:
+            time.sleep(POLL_INTERVAL_SEC)
+            o = self.client.get_order_by_id(order_id)
+            if o.status == OrderStatus.FILLED:
+                logger.info("[%s] FILLED @ $%s", trade_id, o.filled_avg_price)
+                return "filled"
+            if o.status in (OrderStatus.CANCELED, OrderStatus.EXPIRED):
+                return str(o.status.value)
+        return "timeout"
+
+    # ── Submit LIMIT order ───────────────────────────────────────────────────
+
+    def submit_order(self, signal: dict, retry_market: bool = False) -> dict:
+        """
+        Submit a LIMIT order ±0.1% from current price.
+        Cancel after 30s if unfilled; optionally retry as market.
+
+        Parameters
+        ----------
+        signal : dict
+            { symbol, side ('buy'|'sell'), qty, current_price }
+        retry_market : bool
+            If True, submit a market order when the limit times out.
+
+        Returns
+        -------
+        dict
+            { trade_id, order_id, status }
+        """
+        trade_id = _new_trade_id()
+        side     = OrderSide.BUY if signal["side"] == "buy" else OrderSide.SELL
+        limit_px = self._limit_price(side, signal["current_price"])
 
         req = LimitOrderRequest(
-            symbol=signal.symbol,
-            qty=signal.qty,
-            side=side_enum,
-            limit_price=limit_px,
+            symbol=signal["symbol"],
+            qty=signal["qty"],
+            side=side,
             time_in_force=TimeInForce.DAY,
+            limit_price=limit_px,
             client_order_id=trade_id,
         )
-
         order = self.client.submit_order(req)
-        logger.info("[%s] LIMIT %s %s @ %.2f (order_id=%s)",
-                    trade_id, signal.side.upper(), signal.symbol, limit_px, order.id)
+        self._active[trade_id] = str(order.id)
+        logger.info("[%s] LIMIT %s %s qty=%s @ $%.2f",
+                    trade_id, side.value.upper(), signal["symbol"], signal["qty"], limit_px)
 
-        self._active_orders[trade_id] = str(order.id)
+        fill_status = self._poll_for_fill(order.id, trade_id)
 
-        # Wait for fill, cancel if timeout
-        time.sleep(FILL_TIMEOUT_SECS)
-        refreshed = self.client.get_order_by_id(order.id)
+        if fill_status not in ("filled", "partially_filled"):
+            logger.warning("[%s] Unfilled after %ds — cancelling", trade_id, ORDER_TIMEOUT_SEC)
+            try:
+                self.client.cancel_order_by_id(order.id)
+            except Exception:
+                pass
 
-        if refreshed.status not in ("filled", "partially_filled"):
-            logger.warning("[%s] Unfilled after %ds — cancelling", trade_id, FILL_TIMEOUT_SECS)
-            self.client.cancel_order_by_id(order.id)
+            if retry_market:
+                return self._submit_market_retry(signal, trade_id)
 
-            if retry_at_market:
-                return self._submit_market_order(signal, trade_id)
+        return {"trade_id": trade_id, "order_id": str(order.id), "status": fill_status}
 
-        return {"trade_id": trade_id, "order_id": str(order.id), "status": str(refreshed.status)}
-
-    def _submit_market_order(self, signal: Signal, trade_id: str) -> dict:
-        side_enum = OrderSide.BUY if signal.side == "buy" else OrderSide.SELL
-        req = MarketOrderRequest(
-            symbol=signal.symbol,
-            qty=signal.qty,
-            side=side_enum,
+    def _submit_market_retry(self, signal: dict, trade_id: str) -> dict:
+        side = OrderSide.BUY if signal["side"] == "buy" else OrderSide.SELL
+        req  = MarketOrderRequest(
+            symbol=signal["symbol"],
+            qty=signal["qty"],
+            side=side,
             time_in_force=TimeInForce.DAY,
             client_order_id=f"{trade_id}-MKT",
         )
         order = self.client.submit_order(req)
-        logger.info("[%s] MARKET %s %s (retry)", trade_id, signal.side.upper(), signal.symbol)
+        logger.info("[%s] MARKET retry submitted for %s", trade_id, signal["symbol"])
         return {"trade_id": trade_id, "order_id": str(order.id), "status": "market_retry"}
 
-    def submit_bracket_order(self, signal: Signal) -> dict:
-        """Entry + stop-loss + take-profit via Alpaca OCO bracket."""
-        if signal.stop_price is None or signal.take_profit is None:
-            raise ValueError("Bracket order requires stop_price and take_profit")
+    # ── Bracket order ────────────────────────────────────────────────────────
 
-        trade_id  = self._new_trade_id()
-        limit_px  = self._limit_price(signal.side, signal.current_price)
-        side_enum = OrderSide.BUY if signal.side == "buy" else OrderSide.SELL
+    def submit_bracket_order(self, signal: dict) -> dict:
+        """
+        Submit entry + stop-loss + take-profit via Alpaca OCO bracket.
 
-        req = LimitOrderRequest(
-            symbol=signal.symbol,
-            qty=signal.qty,
-            side=side_enum,
+        Parameters
+        ----------
+        signal : dict
+            { symbol, side, qty, current_price, stop_price, take_profit_price }
+        """
+        trade_id = _new_trade_id()
+        side     = OrderSide.BUY if signal["side"] == "buy" else OrderSide.SELL
+        limit_px = self._limit_price(side, signal["current_price"])
+
+        req = OrderRequest(
+            symbol=signal["symbol"],
+            qty=signal["qty"],
+            side=side,
+            type="limit",
+            time_in_force=TimeInForce.DAY,
             limit_price=limit_px,
-            time_in_force=TimeInForce.GTC,
-            order_class=OrderClass.BRACKET,
-            take_profit=TakeProfitRequest(limit_price=signal.take_profit),
-            stop_loss=StopLossRequest(stop_price=signal.stop_price),
+            order_class="bracket",
+            stop_loss=StopLossRequest(stop_price=signal["stop_price"]),
+            take_profit=TakeProfitRequest(limit_price=signal["take_profit_price"]),
             client_order_id=trade_id,
         )
-
         order = self.client.submit_order(req)
-        logger.info("[%s] BRACKET %s %s — entry=%.2f stop=%.2f tp=%.2f",
-                    trade_id, signal.side.upper(), signal.symbol,
-                    limit_px, signal.stop_price, signal.take_profit)
+        self._active[trade_id] = str(order.id)
+        logger.info(
+            "[%s] BRACKET %s %s — entry=$%.2f  stop=$%.2f  tp=$%.2f",
+            trade_id, side.value.upper(), signal["symbol"],
+            limit_px, signal["stop_price"], signal["take_profit_price"],
+        )
+        return {"trade_id": trade_id, "order_id": str(order.id), "status": "bracket_submitted"}
 
-        self._active_orders[trade_id] = str(order.id)
-        return {"trade_id": trade_id, "order_id": str(order.id)}
+    # ── Stop management ──────────────────────────────────────────────────────
 
-    def modify_stop(self, symbol: str, new_stop: float, current_stop: float) -> bool:
-        """Only TIGHTEN the stop — never widen it."""
-        if new_stop <= current_stop:
-            logger.warning("modify_stop: new_stop=%.2f is not tighter than current=%.2f — skipped",
-                           new_stop, current_stop)
+    def modify_stop(
+        self,
+        symbol: str,
+        new_stop: float,
+        current_stop: float,
+        position_side: str = "long",
+    ) -> bool:
+        """
+        Modify the open stop order for *symbol*.
+        Only TIGHTEN — never widen:
+          • long  → new_stop must be ABOVE current_stop (raise the floor)
+          • short → new_stop must be BELOW current_stop (lower the ceiling)
+
+        Returns True if the stop was successfully replaced, False otherwise.
+        """
+        if position_side == "long" and new_stop <= current_stop:
+            logger.warning(
+                "modify_stop refused: %.2f ≤ %.2f (would widen LONG stop on %s)",
+                new_stop, current_stop, symbol,
+            )
             return False
-        logger.info("modify_stop: %s  %.2f → %.2f", symbol, current_stop, new_stop)
-        # Actual modification requires cancelling old stop leg and resubmitting
-        # Implementation depends on your position-tracking integration
-        return True
+        if position_side == "short" and new_stop >= current_stop:
+            logger.warning(
+                "modify_stop refused: %.2f ≥ %.2f (would widen SHORT stop on %s)",
+                new_stop, current_stop, symbol,
+            )
+            return False
 
-    def cancel_order(self, order_id: str):
+        req    = GetOrdersRequest(status=QueryOrderStatus.OPEN)
+        orders = self.client.get_orders(filter=req)
+
+        for o in orders:
+            if o.symbol == symbol and str(o.type) in ("stop", "stop_limit"):
+                try:
+                    self.client.replace_order_by_id(
+                        o.id,
+                        ReplaceOrderRequest(stop_price=new_stop),
+                    )
+                    logger.info("modify_stop %s: $%.2f → $%.2f ✓", symbol, current_stop, new_stop)
+                    return True
+                except Exception as exc:
+                    logger.error("modify_stop failed for %s: %s", symbol, exc)
+                    return False
+
+        logger.warning("modify_stop: no open stop order found for %s", symbol)
+        return False
+
+    # ── Cancellation / close ─────────────────────────────────────────────────
+
+    def cancel_order(self, order_id: str) -> None:
         self.client.cancel_order_by_id(order_id)
-        logger.info("Cancelled order %s", order_id)
+        logger.info("Order %s cancelled", order_id)
 
-    def close_position(self, symbol: str):
+    def close_position(self, symbol: str) -> None:
         self.client.close_position(symbol)
-        logger.info("Closed position: %s", symbol)
+        logger.info("Position closed: %s", symbol)
 
-    def close_all_positions(self):
+    def close_all_positions(self) -> None:
         self.client.close_all_positions(cancel_orders=True)
-        logger.warning("CLOSED ALL POSITIONS")
+        logger.warning("ALL positions and open orders closed.")

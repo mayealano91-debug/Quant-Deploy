@@ -1,1 +1,6 @@
-# Paste your .gitignore contents here
+.env
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/

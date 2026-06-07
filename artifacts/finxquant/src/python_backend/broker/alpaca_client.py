@@ -2,8 +2,9 @@
 broker/alpaca_client.py
 -----------------------
 Alpaca-py SDK wrapper.
-Credentials loaded from .env — NEVER hardcoded.
+Credentials loaded exclusively from environment variables / .env — NEVER hardcoded.
 Paper trading is the default (ALPACA_PAPER=TRUE).
+Auto-reconnects with exponential back-off on startup failure.
 """
 
 import os
@@ -14,96 +15,122 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import GetOrdersRequest
 from alpaca.trading.enums import QueryOrderStatus
 
-load_dotenv()  # reads .env in project root
+load_dotenv()  # no-op if .env absent (Replit injects env vars directly)
 
 logger = logging.getLogger(__name__)
 
 PAPER_URL = "https://paper-api.alpaca.markets"
 LIVE_URL  = "https://api.alpaca.markets"
 
-MAX_RETRIES    = 5
-BACKOFF_BASE   = 2   # seconds — exponential: 2, 4, 8, 16, 32
+_MAX_RETRIES  = 5
+_BACKOFF_BASE = 2  # seconds — doubles each attempt: 2, 4, 8, 16, 32
+
+
+def _require_live_confirmation() -> None:
+    """Interactively guard against accidental live-money connections."""
+    answer = input(
+        "\n⚠️  WARNING: ALPACA_PAPER=FALSE — you are about to connect to LIVE trading.\n"
+        "   Real funds are at risk.\n"
+        "   Type 'CONFIRM LIVE' to proceed: "
+    ).strip()
+    if answer != "CONFIRM LIVE":
+        raise SystemExit("Live trading not confirmed — aborting.")
 
 
 class AlpacaClient:
-    def __init__(self):
-        self.api_key    = os.environ["ALPACA_API_KEY"]
-        self.secret_key = os.environ["ALPACA_SECRET_KEY"]
-        self.paper      = os.getenv("ALPACA_PAPER", "TRUE").upper() == "TRUE"
+    """
+    Thread-safe wrapper around alpaca-py TradingClient.
+    Instantiate once; share the instance across OrderExecutor and PositionTracker.
+    """
+
+    def __init__(self) -> None:
+        self._api_key    = os.getenv("ALPACA_API_KEY")
+        self._secret_key = os.getenv("ALPACA_SECRET_KEY")
+        self.paper       = os.getenv("ALPACA_PAPER", "TRUE").upper() == "TRUE"
+
+        if not self._api_key or not self._secret_key:
+            raise EnvironmentError(
+                "ALPACA_API_KEY and ALPACA_SECRET_KEY must be set in the environment "
+                "(or in a .env file). Never hardcode credentials."
+            )
 
         if not self.paper:
-            self._confirm_live_trading()
+            _require_live_confirmation()
 
-        self.client = self._connect_with_retry()
-        self._health_check()
+        self.base_url = PAPER_URL if self.paper else LIVE_URL
+        self.client: TradingClient = self._connect_with_backoff()
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
+    # ── Connection helpers ────────────────────────────────────────────────────
 
-    def _confirm_live_trading(self):
-        """Force explicit confirmation before any live-money connection."""
-        answer = input(
-            "\n⚠️  WARNING: ALPACA_PAPER=FALSE — you are about to connect to LIVE trading.\n"
-            "   Real funds are at risk. Type 'CONFIRM LIVE' to proceed: "
-        )
-        if answer.strip() != "CONFIRM LIVE":
-            raise SystemExit("Live trading cancelled by user.")
-
-    def _make_client(self) -> TradingClient:
+    def _build_client(self) -> TradingClient:
         return TradingClient(
-            api_key=self.api_key,
-            secret_key=self.secret_key,
+            api_key=self._api_key,
+            secret_key=self._secret_key,
             paper=self.paper,
         )
 
-    def _connect_with_retry(self) -> TradingClient:
-        """Exponential back-off reconnect on startup."""
-        for attempt in range(1, MAX_RETRIES + 1):
+    def _connect_with_backoff(self) -> TradingClient:
+        """Attempt connection with exponential back-off; raise after all retries."""
+        for attempt in range(1, _MAX_RETRIES + 1):
             try:
-                client = self._make_client()
-                logger.info("AlpacaClient connected (paper=%s)", self.paper)
+                client = self._build_client()
+                self._health_check(client)
+                mode = "PAPER" if self.paper else "LIVE ⚡"
+                logger.info("[AlpacaClient] Connected (%s) — %s", mode, self.base_url)
                 return client
             except Exception as exc:
-                wait = BACKOFF_BASE ** attempt
+                wait = _BACKOFF_BASE ** attempt
                 logger.warning(
-                    "Connection attempt %d/%d failed: %s — retrying in %ds",
-                    attempt, MAX_RETRIES, exc, wait,
+                    "[AlpacaClient] Attempt %d/%d failed: %s — retrying in %ds",
+                    attempt, _MAX_RETRIES, exc, wait,
                 )
-                if attempt == MAX_RETRIES:
-                    raise
+                if attempt == _MAX_RETRIES:
+                    raise ConnectionError(
+                        f"[AlpacaClient] All {_MAX_RETRIES} connection attempts exhausted."
+                    ) from exc
                 time.sleep(wait)
 
-    def _health_check(self):
-        """Verify connectivity and log account summary on startup."""
-        acct = self.get_account()
+    def reconnect(self) -> None:
+        """Explicit reconnect — call after a detected network drop."""
+        logger.info("[AlpacaClient] Reconnecting…")
+        self.client = self._connect_with_backoff()
+
+    def _health_check(self, client: TradingClient) -> None:
+        """Verify credentials + log account summary on startup."""
+        acct = client.get_account()
         logger.info(
-            "Health check OK — equity=$%.2f  cash=$%.2f  buying_power=$%.2f",
-            float(acct.equity), float(acct.cash), float(acct.buying_power),
+            "[AlpacaClient] Health OK · Account #%s · "
+            "Equity=$%.2f  Cash=$%.2f  BuyingPower=$%.2f",
+            acct.account_number,
+            float(acct.equity),
+            float(acct.cash),
+            float(acct.buying_power),
         )
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    # ── Account & portfolio ───────────────────────────────────────────────────
 
     def get_account(self):
-        """Return full account object."""
+        """Return full account object from Alpaca."""
         return self.client.get_account()
 
     def get_positions(self) -> list:
-        """Return list of open positions."""
+        """Return list of currently open positions."""
         return self.client.get_all_positions()
 
     def get_order_history(self, status: str = "all", limit: int = 100) -> list:
         req = GetOrdersRequest(status=QueryOrderStatus(status), limit=limit)
         return self.client.get_orders(filter=req)
 
-    def is_market_open(self) -> bool:
-        return self.client.get_clock().is_open
+    def get_available_margin(self) -> float:
+        """Return current buying power as a float."""
+        return float(self.get_account().buying_power)
+
+    # ── Market hours ─────────────────────────────────────────────────────────
 
     def get_clock(self):
+        """Return Alpaca's market clock object."""
         return self.client.get_clock()
 
-    def get_available_margin(self) -> float:
-        acct = self.get_account()
-        return float(acct.buying_power)
+    def is_market_open(self) -> bool:
+        """True if the US equity market is currently open."""
+        return self.get_clock().is_open

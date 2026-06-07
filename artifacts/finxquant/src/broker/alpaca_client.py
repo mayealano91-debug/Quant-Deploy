@@ -16,7 +16,7 @@ load_dotenv()  # reads .env in project root
 
 logger = logging.getLogger(__name__)
 
-PAPER_BASE_URL = "https://paper-api.alpaca.markets"
+PAPER_BASE_URL = "https://paper-api.alpaca.markets/v2"
 LIVE_BASE_URL  = "https://api.alpaca.markets"
 
 _MAX_RETRIES   = 5
